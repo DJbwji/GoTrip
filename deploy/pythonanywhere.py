@@ -27,6 +27,30 @@ class DeploymentError(RuntimeError):
     pass
 
 
+def api_error_detail(body, token):
+    try:
+        decoded = json.loads(body)
+    except (ValueError, TypeError):
+        return ''
+    if not isinstance(decoded, dict):
+        return ''
+    allowed = ('python_version', 'domain_name', 'source_directory', 'virtualenv_path',
+               'force_https', 'non_field_errors', 'error', 'detail')
+    parts = []
+    for key in allowed:
+        if key in decoded:
+            message = str(decoded[key]).replace(token, '[redacted]') if token else str(decoded[key])
+            parts.append(f'{key}: {message[:300]}')
+    return '; '.join(parts)[:1500]
+
+
+def is_unconfigured(configuration, project):
+    source = configuration.get('source_directory')
+    return not configuration.get('virtualenv_path') and (
+        not source or Path(source).resolve() == project.parent.resolve()
+    )
+
+
 class PythonAnywhereAPI:
     def __init__(self, username, token, host='www.pythonanywhere.com'):
         if host not in HOSTS or not re.fullmatch(r'[a-zA-Z0-9_-]+', username):
@@ -43,21 +67,28 @@ class PythonAnywhereAPI:
         try:
             with urlopen(request, timeout=90) as response:
                 body = response.read()
-            return json.loads(body) if body.strip() else None
+            result = json.loads(body) if body.strip() else None
+            if isinstance(result, dict) and result.get('status') == 'ERROR':
+                detail = api_error_detail(body, self.token)
+                raise DeploymentError(f'PythonAnywhere rejected {method} {path}. {detail}')
+            return result
         except HTTPError as error:
-            # Never print request headers, API tokens, or raw server responses.
-            raise DeploymentError(f'PythonAnywhere API returned HTTP {error.code} for {path}.') from None
+            # Only selected validation fields may be shown; credentials are redacted.
+            detail = api_error_detail(error.read(8192), self.token)
+            raise DeploymentError(f'PythonAnywhere API returned HTTP {error.code} for {method} {path}. {detail}') from None
         except URLError:
             raise DeploymentError('PythonAnywhere API is temporarily unavailable. Retry this command later.') from None
 
     def configure(self, domain, project, environment, wsgi_source, python_version, data_dir):
         apps = self.request('/webapps/')
-        existing = next((app for app in apps if app['domain_name'] == domain), None)
+        existing = next((app for app in apps if app['domain_name'].casefold() == domain.casefold()), None)
+        if existing:
+            domain = existing['domain_name']
         app_path = f'/webapps/{domain}/'
         if existing:
             configuration = self.request(app_path)
             source = configuration.get('source_directory')
-            if source and Path(source).resolve() != project.resolve():
+            if source and Path(source).resolve() != project.resolve() and not is_unconfigured(configuration, project):
                 raise DeploymentError('This domain already hosts another project. Existing configuration was preserved.')
         else:
             if apps:
@@ -70,10 +101,10 @@ class PythonAnywhereAPI:
         if wsgi_path.resolve() != expected_wsgi.resolve():
             raise DeploymentError('Unexpected WSGI configuration location; no WSGI file was overwritten.')
         current = wsgi_path.read_text() if wsgi_path.exists() else ''
-        if current and MARKER not in current and existing and configuration.get('source_directory'):
+        if current and MARKER not in current and existing and not is_unconfigured(configuration, project):
             raise DeploymentError('Existing WSGI is not managed by GoTrip. It was preserved.')
         self.request(app_path, 'PATCH', {
-            'python_version': python_version, 'source_directory': str(project),
+            'source_directory': str(project),
             'virtualenv_path': str(environment), 'force_https': 'true',
         })
         if current and MARKER not in current:
@@ -95,8 +126,8 @@ def production_environment(domain, data_dir):
     return {
         'DJANGO_DEBUG': '0',
         'DJANGO_SECRET_KEY': secrets.token_urlsafe(64),
-        'DJANGO_ALLOWED_HOSTS': domain,
-        'DJANGO_CSRF_TRUSTED_ORIGINS': 'https://' + domain,
+        'DJANGO_ALLOWED_HOSTS': domain.lower(),
+        'DJANGO_CSRF_TRUSTED_ORIGINS': 'https://' + domain.lower(),
         'DJANGO_TRUST_PROXY': '1',
         'GOTRIP_DATA_DIR': str(data_dir),
         'DEMO_PAYMENTS': '1',
@@ -168,16 +199,17 @@ def main(argv=None):
     data_dir = home / '.gotrip-data'
     environment = home / '.virtualenvs' / 'gotrip'
     domain_suffix = 'eu.pythonanywhere.com' if options.host.startswith('eu.') else 'pythonanywhere.com'
-    domain = username.lower() + '.' + domain_suffix
+    domain = username + '.' + domain_suffix
     api = PythonAnywhereAPI(username, token, options.host)
     apps = api.request('/webapps/')
-    own_app = next((app for app in apps if app['domain_name'] == domain), None)
+    own_app = next((app for app in apps if app['domain_name'].casefold() == domain.casefold()), None)
     if apps and not own_app:
         raise DeploymentError('Another website already uses this account. Nothing was replaced.')
     if own_app:
+        domain = own_app['domain_name']
         configuration = api.request(f'/webapps/{domain}/')
         source = configuration.get('source_directory')
-        if source and Path(source).resolve() != project:
+        if source and Path(source).resolve() != project and not is_unconfigured(configuration, project):
             raise DeploymentError('The existing website belongs to another project. Nothing was replaced.')
     if project.exists():
         if not (project / '.git').is_dir() or project.is_symlink():
@@ -203,7 +235,7 @@ def main(argv=None):
             handle.write('\n'.join(f'{key}={value}' for key, value in values.items()) + '\n')
         env_path.chmod(0o600)
     values = read_environment(env_path)
-    if (values.get('DJANGO_DEBUG') != '0' or values.get('DJANGO_ALLOWED_HOSTS') != domain
+    if (values.get('DJANGO_DEBUG') != '0' or values.get('DJANGO_ALLOWED_HOSTS', '').lower() != domain.lower()
             or values.get('GOTRIP_DATA_DIR') != str(data_dir)
             or len(values.get('DJANGO_SECRET_KEY', '')) < 50):
         raise DeploymentError('Existing .env does not match safe hosting settings. It was not overwritten.')

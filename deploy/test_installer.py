@@ -1,4 +1,5 @@
 import sqlite3
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -13,7 +14,7 @@ class InstallerTests(TestCase):
 
     def test_failure_message_does_not_include_api_token(self):
         api = PythonAnywhereAPI('example', 'private-token')
-        error = HTTPError(api.base + '/webapps/', 403, 'Denied', {}, None)
+        error = HTTPError(api.base + '/webapps/', 403, 'Denied', {}, BytesIO(b'{}'))
         with patch('deploy.pythonanywhere.urlopen', side_effect=error):
             with self.assertRaises(DeploymentError) as caught:
                 api.request('/webapps/')
@@ -51,3 +52,49 @@ class InstallerTests(TestCase):
         self.assertEqual(first['DJANGO_DEBUG'], '0')
         self.assertGreaterEqual(len(first['DJANGO_SECRET_KEY']), 50)
         self.assertNotEqual(first['DJANGO_SECRET_KEY'], second['DJANGO_SECRET_KEY'])
+
+    def test_provider_validation_is_reported_without_secrets(self):
+        api = PythonAnywhereAPI('example', 'private-token')
+        body = b'{"python_version":["Invalid choice"],"detail":"private-token","password":"do-not-display"}'
+        error = HTTPError(api.base + '/webapps/example/', 400, 'Bad request', {}, BytesIO(body))
+        with patch('deploy.pythonanywhere.urlopen', side_effect=error):
+            with self.assertRaises(DeploymentError) as caught:
+                api.request('/webapps/example/', 'PATCH', {'python_version':'invalid'})
+        message = str(caught.exception)
+        self.assertIn('PATCH', message)
+        self.assertIn('Invalid choice', message)
+        self.assertNotIn('private-token', message)
+        self.assertNotIn('do-not-display', message)
+
+    def test_api_error_status_is_not_treated_as_success(self):
+        api = PythonAnywhereAPI('example', 'token')
+        with patch('deploy.pythonanywhere.urlopen', return_value=BytesIO(b'{"status":"ERROR","error":"Domain unavailable"}')):
+            with self.assertRaises(DeploymentError):
+                api.request('/webapps/', 'POST', {'domain_name':'example.pythonanywhere.com'})
+
+    def test_resume_keeps_domain_spelling_and_does_not_patch_python_version(self):
+        domain = 'DJbwji.pythonanywhere.com'
+        project = Path('/home/DJbwji/gotrip')
+        api = PythonAnywhereAPI('DJbwji', 'token')
+        recorded = []
+        def provider(path, method='GET', values=None):
+            recorded.append((path, method, values))
+            if path == '/webapps/':
+                if method != 'GET':
+                    self.fail('Must resume the existing app, not create a duplicate')
+                return [{'domain_name':domain}]
+            if path == f'/webapps/{domain}/' and method == 'GET':
+                return {'source_directory':'/home/DJbwji', 'virtualenv_path':''}
+            if path == f'/webapps/{domain}/' and method == 'PATCH':
+                if 'python_version' in values:
+                    raise DeploymentError('Invalid version format on PATCH')
+                return {}
+            if path.endswith('/static_files/') and method == 'GET':
+                return []
+            return {}
+        api.request = provider
+        with patch.object(Path, 'exists', return_value=False), patch.object(Path, 'write_text'):
+            api.configure(domain.lower(), project, Path('/home/DJbwji/.virtualenvs/gotrip'),
+                          'wsgi', 'python312', Path('/home/DJbwji/.gotrip-data'))
+        self.assertTrue(any(method == 'PATCH' and path == f'/webapps/{domain}/' for path, method, _ in recorded))
+        self.assertEqual(recorded[-1][0], f'/webapps/{domain}/reload/')

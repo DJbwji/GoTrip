@@ -12,19 +12,32 @@ from core.models import Activity
 
 class Command(BaseCommand):
     help = 'Create repeatable demonstration data. Does not reset existing accounts.'
+    def add_arguments(self, parser):
+        parser.add_argument('--public-catalog', action='store_true', help='Seed a public catalog with login-disabled sample accounts and no demo administrator.')
+
     def handle(self, *args, **options):
-        if not settings.DEBUG: raise CommandError('Demo data may only be created with DEBUG=True.')
+        public = options.get('public_catalog', False)
+        if not settings.DEBUG and not public:
+            raise CommandError('Demo accounts may only be created with DEBUG=True. Use --public-catalog for hosted sample content.')
+        if public:
+            sample_emails = ['tourist@gotrip.local', 'guide@gotrip.local', 'ivan@gotrip.local', 'marina@gotrip.local', 'newguide@gotrip.local', 'admin@gotrip.local']
+            existing = User.objects.filter(email__in=sample_emails)
+            if any(account.has_usable_password() or account.is_staff or account.is_superuser for account in existing):
+                raise CommandError('Existing sample accounts have login access. Use a fresh hosting database; do not publish the local demonstration database.')
         def user(email, name, **flags):
             obj, created = User.objects.get_or_create(email=email, defaults={'username':email,'first_name':name, **flags})
             if created:
-                obj.set_password('GoTrip2026!')
+                if public:
+                    obj.set_unusable_password()
+                else:
+                    obj.set_password('GoTrip2026!')
                 obj.save()
                 Activity.objects.create(user=obj, text='Добро пожаловать в GoTrip!')
             Profile.objects.get_or_create(user=obj)
             return obj
         traveler = user('tourist@gotrip.local','Александра')
         guide = user('guide@gotrip.local','Анна')
-        admin = user('admin@gotrip.local','Модератор',is_staff=True,is_superuser=True)
+        admin = None if public else user('admin@gotrip.local','Модератор',is_staff=True,is_superuser=True)
         other = user('ivan@gotrip.local','Иван')
         marina = user('marina@gotrip.local','Марина')
         applicant = user('newguide@gotrip.local','Михаил')
@@ -80,4 +93,7 @@ class Command(BaseCommand):
         if not chat.messages.exists():
             Message.objects.create(conversation=chat,sender=traveler,text='Здравствуйте! Подскажите, подойдёт ли прогулка для первого знакомства с городом?')
             Message.objects.create(conversation=chat,sender=guide,text='Здравствуйте, Александра! Конечно. Покажу и главные места, и мои любимые тихие уголки. Буду рада знакомству!')
-        self.stdout.write(self.style.SUCCESS('Demo ready. tourist@gotrip.local / guide@gotrip.local / admin@gotrip.local | password: GoTrip2026!'))
+        if public:
+            self.stdout.write(self.style.SUCCESS('Public catalog is ready. Sample accounts cannot sign in; no sample administrator was created.'))
+        else:
+            self.stdout.write(self.style.SUCCESS('Demo ready. tourist@gotrip.local / guide@gotrip.local / admin@gotrip.local | password: GoTrip2026!'))

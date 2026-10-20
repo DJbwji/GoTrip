@@ -13,7 +13,11 @@ DEBUG = os.getenv('DJANGO_DEBUG', '1') == '1'
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'local-development-only-gotrip-change-in-production')
 if not DEBUG and SECRET_KEY.startswith('local-development'):
     raise RuntimeError('Set DJANGO_SECRET_KEY for production')
-ALLOWED_HOSTS = os.getenv('DJANGO_ALLOWED_HOSTS', '127.0.0.1,localhost,testserver').split(',')
+ALLOWED_HOSTS = [host.strip() for host in os.getenv('DJANGO_ALLOWED_HOSTS', '127.0.0.1,localhost,testserver').split(',') if host.strip()]
+CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in os.getenv('DJANGO_CSRF_TRUSTED_ORIGINS', '').split(',') if origin.strip()]
+DATA_DIR = Path(os.getenv('GOTRIP_DATA_DIR', str(BASE_DIR))).expanduser()
+if os.getenv('DJANGO_TRUST_PROXY', '0') == '1':
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 INSTALLED_APPS = ['django.contrib.admin', 'django.contrib.auth', 'django.contrib.contenttypes',
     'django.contrib.sessions', 'django.contrib.messages', 'django.contrib.staticfiles',
     'core', 'users', 'tours', 'trips', 'bookings', 'messaging', 'moderation']
@@ -26,7 +30,7 @@ TEMPLATES = [{'BACKEND': 'django.template.backends.django.DjangoTemplates', 'DIR
     'APP_DIRS': True, 'OPTIONS': {'context_processors': ['django.template.context_processors.request',
         'django.contrib.auth.context_processors.auth', 'django.contrib.messages.context_processors.messages']}}]
 WSGI_APPLICATION = 'gotrip.wsgi.application'
-DATABASES = {'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': BASE_DIR / 'db.sqlite3', 'OPTIONS': {'timeout': 20}}}
+DATABASES = {'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': DATA_DIR / 'db.sqlite3', 'OPTIONS': {'timeout': 20}}}
 if os.getenv('POSTGRES_DB'):
     DATABASES['default'] = {'ENGINE': 'django.db.backends.postgresql', 'NAME': os.environ['POSTGRES_DB'],
         'USER': os.getenv('POSTGRES_USER', 'gotrip'), 'PASSWORD': os.getenv('POSTGRES_PASSWORD', ''),
@@ -44,7 +48,7 @@ STATIC_URL = '/static/'
 STATICFILES_DIRS = [BASE_DIR / 'static']
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_ROOT = DATA_DIR / 'media'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 LOGIN_URL = 'users:login'
 LOGIN_REDIRECT_URL = 'users:dashboard'
